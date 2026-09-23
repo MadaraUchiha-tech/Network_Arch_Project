@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""
+Binary HTTP client: ./bcurl -v localhost:9000/index.html
+
+Fetches one file over BCP1 using a single TCP connection.
+"""
+
+import socket
+import sys
+
+from protocol import (
+    FRAME_RESPONSE,
+    METHOD_GET,
+    ProtocolError,
+    decode_response,
+    encode_request,
+    hexdump,
+    read_frame,
+)
+
+
+def parse_target(arg):
+    """
+    Parse host:port/path into (host, port, path).
+    Examples: localhost:9000/index.html  -> localhost, 9000, /index.html
+              localhost/index.html       -> localhost, 80, /index.html
+    """
+    if "/" not in arg:
+        raise ValueError("expected host:port/path")
+
+    host_port, path = arg.split("/", 1)
+    path = "/" + path
+
+    if ":" in host_port:
+        host, port_str = host_port.rsplit(":", 1)
+        port = int(port_str)
+    else:
+        host = host_port
+        port = 80
+
+    return host, port, path
+
+
+def main():
+    verbose = False
+    args = sys.argv[1:]
+
+    if args and args[0] == "-v":
+        verbose = True
+        args = args[1:]
+
+    if len(args) != 1:
+        print(f"Usage: {sys.argv[0]} [-v] host:port/path", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        host, port, path = parse_target(args[0])
+    except ValueError as e:
+        print(f"Invalid target: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    request_frame = encode_request(
+        METHOD_GET,
+        path,
+        indexed=[(2, host)],  # index 2 = host
+    )
+
+    with socket.create_connection((host, port)) as sock:
+        if verbose:
+            print(hexdump(request_frame, label=">>> REQUEST frame"))
+        sock.sendall(request_frame)
+
+        try:
+            frame_type, payload = read_frame(sock)
+        except ProtocolError as e:
+            print(f"Protocol error: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        if frame_type != FRAME_RESPONSE:
+            print("Expected RESPONSE frame", file=sys.stderr)
+            sys.exit(1)
+
+        if verbose:
+            from protocol import encode_frame, FRAME_RESPONSE as FT
+
+            # Re-wrap for hexdump display (payload only came back from read_frame)
+            full = encode_frame(FT, payload)
+            print(hexdump(full, label="<<< RESPONSE frame"))
+
+        try:
+            resp = decode_response(payload)
+        except ProtocolError as e:
+            print(f"Malformed response: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        status = resp["status"]
+        if status >= 400:
+            print(f"HTTP error {status}", file=sys.stderr)
+            sys.exit(1)
+
+        sys.stdout.buffer.write(resp["body"])
+
+
+if __name__ == "__main__":
+    main()

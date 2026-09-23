@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""
+Binary file server: ./bserve ./www 9000
+
+Serves files from a root directory over BCP1 on a persistent TCP connection.
+"""
+
+import os
+import socket
+import sys
+
+from protocol import (
+    FRAME_REQUEST,
+    METHOD_GET,
+    ProtocolError,
+    decode_request,
+    encode_response,
+    read_frame,
+)
+
+
+def safe_path(root, req_path):
+    """Map request path to a file under root, blocking directory traversal."""
+    if not req_path.startswith("/"):
+        return None
+    # Drop leading slash and join
+    rel = req_path.lstrip("/")
+    if ".." in rel.split("/"):
+        return None
+    full = os.path.normpath(os.path.join(root, rel))
+    root_abs = os.path.abspath(root)
+    if not os.path.abspath(full).startswith(root_abs):
+        return None
+    return full
+
+
+def handle_request(root, req):
+    """Return (status, body_bytes) for one decoded request."""
+    if req["method"] != METHOD_GET:
+        return 400, b""
+
+    filepath = safe_path(root, req["path"])
+    if filepath is None:
+        return 400, b""
+
+    if not os.path.isfile(filepath):
+        return 404, b""
+
+    with open(filepath, "rb") as f:
+        return 200, f.read()
+
+
+def serve_client(conn, root):
+    """Serve multiple requests on one connection."""
+    while True:
+        try:
+            frame_type, payload = read_frame(conn)
+        except ProtocolError:
+            return
+        except ConnectionResetError:
+            return
+
+        if frame_type != FRAME_REQUEST:
+            continue
+
+        try:
+            req = decode_request(payload)
+            status, body = handle_request(root, req)
+            conn.sendall(encode_response(status, body))
+        except ProtocolError:
+            conn.sendall(encode_response(400, b""))
+
+
+def main():
+    if len(sys.argv) != 3:
+        print(f"Usage: {sys.argv[0]} <webroot> <port>", file=sys.stderr)
+        sys.exit(1)
+
+    root = sys.argv[1]
+    port = int(sys.argv[2])
+
+    if not os.path.isdir(root):
+        print(f"Not a directory: {root}", file=sys.stderr)
+        sys.exit(1)
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(("0.0.0.0", port))
+        server.listen(5)
+        print(f"bserve: root={root} port={port}")
+
+        while True:
+            conn, addr = server.accept()
+            print(f"Connection from {addr}")
+            try:
+                serve_client(conn, root)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            finally:
+                conn.close()
+
+
+if __name__ == "__main__":
+    main()

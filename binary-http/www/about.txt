@@ -1,0 +1,2 @@
+BCP1 file server demo.
+One TCP connection, binary frames, persistent socket.
